@@ -6,7 +6,7 @@
             [org.httpkit.client :as http]))
 
 (defn- error-message [response]
-  (get-in response [:body :message]))
+  (get-in response [:parsed-body :message]))
 
 (defn- auth-failure
   [response]
@@ -48,18 +48,6 @@
         (service-rate-limit response)
         (service-unexpected-cond response))))
 
-(defn github-issues-endpoint [& [organization]]
-  (if organization
-      (format "https://api.github.com/orgs/%s/issues" organization)
-      "https://api.github.com/issues"))
-
-(def query-params
-  {:per_page 100
-   :filter "all"
-   :state "all"
-   :sort "created"
-   :direction "asc"})
-
 (defn json->map
   "Convert JSON body to a map."
   [{:keys [body] :as response}]
@@ -73,22 +61,21 @@
         (throw error)
         response)))
 
-(defn get-json [token url & [query-params]]
-  (let [headers {"Accept" "application/vnd.github.raw+json"}
+(def base-url "https://api.github.com")
+
+(defn get-resource [token url-path & [query-params]]
+  (let [url (format (str base-url "%s") (string/replace url-path base-url ""))
+        headers {"Accept" "application/vnd.github.raw+json"}
         options (merge {:oauth-token token
                         :headers headers}
                   (when query-params {:query-params query-params}))
         response (http-get url options)
         body (json->map response)
-        parsed-response (assoc response :body body)]
+        parsed-response (assoc response :parsed-body body)]
     (or (response-error parsed-response)
-        response)))
+        parsed-response)))
 
-(defn issues*
-  [token & [organization page-link]]
-  (let [url (or page-link (github-issues-endpoint organization))
-        query-params* (when-not page-link query-params)]
-    (get-json token url query-params*)))
+;; Pagination
 
 (defn parse-link [link]
   (let [[_ url] (re-find #"<(.*)>" link)
@@ -108,18 +95,58 @@
     (let [link-map (parse-links link)]
       (:next link-map))))
 
-(defn page-number [page-link]
-  (let [[_ page-num] (re-find #"(?:&|\?)page=(\d+)" (or page-link ""))]
+(defn page-number [url]
+  (let [[_ page-num] (re-find #"(?:&|\?)page=(\d+)" (or url ""))]
     (if page-num
         (Integer. page-num)
         1)))
 
-(defn issues [token & [organization page-link]]
-  (let [response (issues* token organization page-link)
-        {:keys [headers body]} response
-        page-num (page-number page-link)
+(defn all-results [body-fn token url & [query-params]]
+  (let [response (get-resource token url query-params)
+        {:keys [headers]} response
+        body (body-fn response)
+        page-num (-> response :opts :url page-number)
         results [[page-num body]]
         next-page-link (next-page headers)]
     (if next-page-link
-        (lazy-cat results (issues token organization next-page-link))
+        (lazy-cat results (all-results body-fn token next-page-link))
         results)))
+
+;; Resources
+
+(def base-query
+  {:per_page 100
+   :sort "created"
+   :direction "asc"})
+
+(defn issues [token & [organization]]
+  (let [url (if organization
+                (format "/orgs/%s/issues" organization)
+                "/issues")
+        query-params (assoc base-query :filter "all" :state "all")]
+    (all-results :body token url query-params)))
+
+(defn repositories [token & [organization]]
+  (let [url (if organization
+                (format "/orgs/%s/repos" organization)
+                "/user/repos")
+        query-params (assoc base-query :visibility "all")]
+    (mapcat second (all-results :parsed-body token url query-params))))
+
+(defn issue-comments* [token repository]
+  (let [owner (get-in repository [:owner :login])
+        repo-name (:name repository)
+        url (format "/repos/%s/%s/issues/comments" owner repo-name)]
+    [[owner repo-name] (all-results :body token url base-query)]))
+
+(defn issue-comments [token repos]
+  (map #(issue-comments* token %) repos))
+
+(defn review-comments* [token repository]
+  (let [owner (get-in repository [:owner :login])
+        repo-name (:name repository)
+        url (format "/repos/%s/%s/pulls/comments" owner repo-name)]
+    [[owner repo-name] (all-results :body token url base-query)]))
+
+(defn review-comments [token repos]
+  (map #(review-comments* token %) repos))
