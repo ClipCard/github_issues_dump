@@ -1,4 +1,9 @@
-(defproject github-issues-dump "0.1.0-SNAPSHOT"
+(defproject github-issues-dump "1.0.0"
+  :license {:name "MIT License"
+            :url "http://opensource.org/licenses/MIT"
+            :key "mit"
+            :year 2015
+            :distribution :repo}
   :main github-issues-dump.core
   :dependencies [[org.clojure/clojure "1.6.0"]
                  [org.clojure/data.json "0.2.5"]
